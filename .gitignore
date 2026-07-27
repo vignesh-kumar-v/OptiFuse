@@ -1,0 +1,12 @@
+# Waymo dataset (huge tfrecords) + generated viewers
+/waymo_perception/
+*_viewer.html
+*.tfrecord
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Tools
+.claude

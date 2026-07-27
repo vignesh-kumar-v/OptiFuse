@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waymo segment viewer</title>
+<style>
+  :root{
+    /* AMOLED: true #000 so the panel pixels are actually off */
+    --bg:#000; --panel:#000; --ctrl:#0c0f13; --line:#1d232b; --fg:#dde3ea;
+    --dim:#78848f; --accent:#4ade80;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg); overflow:hidden;
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:grid; grid-template-rows:1fr auto;
+  }
+  #main{display:grid; grid-template-columns:1fr 420px; min-height:0}
+  #view{position:relative; min-width:0; background:#000}
+  canvas{display:block; width:100%; height:100%}
+  #hud{
+    position:absolute; top:10px; left:12px; pointer-events:none;
+    text-shadow:0 1px 3px #000; font-size:12px; line-height:1.6;
+  }
+  #hud b{color:var(--accent); font-weight:600}
+  #hint{position:absolute; bottom:10px; left:12px; color:var(--dim); font-size:11px}
+  #side{
+    background:var(--panel); border-left:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0; overflow:hidden;
+  }
+  #camtabs{display:flex; flex-wrap:wrap; gap:4px; padding:8px; border-bottom:1px solid var(--line)}
+  #camtabs button{
+    flex:1 1 auto; padding:5px 6px; font:inherit; font-size:11px; cursor:pointer;
+    background:var(--ctrl); color:var(--dim); border:1px solid var(--line); border-radius:4px;
+  }
+  #camtabs button.on{background:#18202b; color:var(--fg); border-color:#31404f}
+  #imgwrap{padding:8px; border-bottom:1px solid var(--line)}
+  #img{width:100%; height:auto; display:block; background:#000; border-radius:4px}
+  #ctrls{padding:10px 12px; overflow-y:auto; flex:1; min-height:0}
+  .row{display:flex; align-items:center; gap:8px; margin-bottom:9px}
+  .row label{color:var(--dim); flex:0 0 88px; font-size:11px}
+  .row input[type=range]{flex:1; accent-color:var(--accent)}
+  .row select{
+    flex:1; background:var(--ctrl); color:var(--fg); border:1px solid var(--line);
+    border-radius:4px; padding:4px; font:inherit; font-size:11px;
+  }
+  .chips{display:flex; flex-wrap:wrap; gap:5px}
+  .chip{
+    padding:3px 8px; border-radius:11px; font-size:11px; cursor:pointer;
+    border:1px solid var(--line); background:var(--ctrl); color:var(--dim); user-select:none;
+  }
+  .chip.on{color:#000; font-weight:600}
+  h4{margin:14px 0 7px; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.09em}
+  h4:first-child{margin-top:0}
+  #objs{font-size:11px; max-height:190px; overflow-y:auto}
+  #objs div{display:flex; justify-content:space-between; gap:8px; padding:2px 0;
+            border-bottom:1px solid #12161b; cursor:pointer}
+  #objs div:hover{background:#0f141a}
+  #objs div.sel{background:#18202b}
+  #objs span:last-child{color:var(--dim)}
+  #sel{font-size:11px; background:var(--ctrl); border:1px solid var(--line);
+       border-radius:5px; padding:9px 10px}
+  #sel .big{font-size:19px; color:var(--accent); font-weight:600; letter-spacing:-.02em}
+  #sel table{width:100%; border-collapse:collapse; margin-top:6px}
+  #sel td{padding:1px 0; vertical-align:top}
+  #sel td:first-child{color:var(--dim); width:96px}
+  #sel .none{color:var(--dim)}
+  #bar{
+    display:flex; align-items:center; gap:12px; padding:8px 14px;
+    background:var(--panel); border-top:1px solid var(--line);
+  }
+  #bar button{
+    width:34px; height:28px; font:inherit; cursor:pointer; border-radius:4px;
+    background:var(--ctrl); color:var(--fg); border:1px solid var(--line);
+  }
+  #seek{flex:1; accent-color:var(--accent)}
+  #tlabel{color:var(--dim); min-width:170px; text-align:right; font-size:11px}
+  #loading{
+    position:fixed; inset:0; display:grid; place-items:center;
+    background:var(--bg); z-index:9; color:var(--dim);
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">decoding payload…</div>
+
+<div id="main">
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="hud"></div>
+    <div id="hint">drag rotate · wheel zoom · shift+drag pan · space play · ←/→ step · r reset</div>
+  </div>
+
+  <div id="side">
+    <div id="camtabs"></div>
+    <div id="imgwrap"><canvas id="img"></canvas></div>
+    <div id="ctrls">
+      <h4>point cloud</h4>
+      <div class="row">
+        <label>color by</label>
+        <select id="mode">
+          <option value="0">intensity</option>
+          <option value="1">elongation</option>
+          <option value="2">height</option>
+          <option value="3">camera RGB</option>
+          <option value="4">flat grey</option>
+        </select>
+      </div>
+      <div class="row"><label>point size</label><input type="range" id="psize" min="1" max="6" step="0.5" value="2"></div>
+      <div class="row"><label>gain</label><input type="range" id="gain" min="0.2" max="8" step="0.1" value="2.5"></div>
+
+      <h4>boxes</h4>
+      <div class="chips" id="typechips"></div>
+      <div class="row" style="margin-top:9px">
+        <label>2D source</label>
+        <select id="src2d">
+          <option value="native">native camera labels</option>
+          <option value="proj">projected 3D labels</option>
+          <option value="none">off</option>
+        </select>
+      </div>
+
+      <h4>selection</h4>
+      <div id="sel"><span class="none">click a box in the 3D view</span></div>
+
+      <h4>objects this frame</h4>
+      <div id="objs"></div>
+
+      <h4>segment</h4>
+      <div id="meta" style="font-size:11px;color:var(--dim)"></div>
+    </div>
+  </div>
+</div>
+
+<div id="bar">
+  <button id="play">▶</button>
+  <input type="range" id="seek" min="0" value="0">
+  <span id="tlabel"></span>
+</div>
+
+<script>
+const META = /*__META__*/ null;
+const PAYLOAD_B64 = "/*__PAYLOAD__*/";
+
+const TYPE = {0:"UNKNOWN",1:"VEHICLE",2:"PEDESTRIAN",3:"SIGN",4:"CYCLIST"};
+const TYPE_COL = {0:[0.6,0.6,0.6],1:[0.29,0.87,0.50],2:[0.38,0.65,0.98],
+                  3:[0.98,0.75,0.14],4:[0.96,0.45,0.71]};
+const hex = c => "#"+c.map(v=>Math.round(v*255).toString(16).padStart(2,"0")).join("");
+
+/* ---------------------------------------------------------------- payload */
+const IS_TEMPLATE = (META === null) || PAYLOAD_B64.startsWith("/*");
+
+function decodePayload(b64){
+  // Native decoder when present (Chrome 133+). The data:-URL fetch trick is NOT
+  // used: it throws "Failed to fetch" once the payload reaches tens of MB.
+  if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(b64);
+  const CH = 1 << 20;                       // multiple of 4, so padding stays at the end
+  const parts = []; let total = 0;
+  for (let i = 0; i < b64.length; i += CH){
+    const bin = atob(b64.slice(i, i + CH));
+    const u = new Uint8Array(bin.length);
+    for (let j = 0; j < bin.length; j++) u[j] = bin.charCodeAt(j);
+    parts.push(u); total += u.length;
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts){ out.set(p, o); o += p.length; }
+  return out;
+}
+
+/* ------------------------------------------------------------------ matrix */
+const M = {
+  mul(a,b){const o=new Float32Array(16);
+    for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;
+      for(let k=0;k<4;k++)s+=a[k*4+j]*b[i*4+k]; o[i*4+j]=s;} return o;},
+  perspective(fovy,asp,n,f){const t=1/Math.tan(fovy/2),o=new Float32Array(16);
+    o[0]=t/asp;o[5]=t;o[10]=(f+n)/(n-f);o[11]=-1;o[14]=2*f*n/(n-f);return o;},
+  lookAt(e,c,u){
+    const z=norm(sub(e,c)), x=norm(cross(u,z)), y=cross(z,x);
+    return new Float32Array([x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0,
+      -dot(x,e),-dot(y,e),-dot(z,e),1]);}
+};
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{const l=Math.hypot(...a)||1;return [a[0]/l,a[1]/l,a[2]/l];};
+
+/* ---------------------------------------------------------------- shaders */
+const VS_PTS = `
+attribute vec3 aPos;      // int16 centimetres
+attribute vec2 aIE;       // intensity, elongation (0..1)
+attribute vec3 aRGB;      // camera colour (0..1), black when unprojected
+uniform mat4 uMVP;
+uniform float uMode, uSize, uGain;
+varying vec3 vCol;
+vec3 ramp(float t){
+  t = clamp(t, 0.0, 1.0);
+  return clamp(vec3(1.5-abs(4.0*t-3.0), 1.5-abs(4.0*t-2.0), 1.5-abs(4.0*t-1.0)), 0.0, 1.0);
+}
+void main(){
+  vec3 p = aPos * 0.01;
+  gl_Position = uMVP * vec4(p, 1.0);
+  gl_PointSize = uSize;
+  if      (uMode < 0.5) vCol = ramp(aIE.x * uGain);
+  else if (uMode < 1.5) vCol = ramp(aIE.y * uGain);
+  else if (uMode < 2.5) vCol = ramp((p.z + 2.5) / 7.0);
+  else if (uMode < 3.5) vCol = (dot(aRGB, vec3(1.0)) > 0.0) ? aRGB : vec3(0.22);
+  else                  vCol = vec3(0.72);
+}`;
+const FS_PTS = `precision mediump float; varying vec3 vCol;
+void main(){ gl_FragColor = vec4(vCol, 1.0); }`;
+
+const VS_LINE = `
+attribute vec3 aPos; attribute vec3 aCol;
+uniform mat4 uMVP; varying vec3 vCol;
+void main(){ gl_Position = uMVP * vec4(aPos,1.0); vCol = aCol; }`;
+const FS_LINE = `precision mediump float; varying vec3 vCol;
+void main(){ gl_FragColor = vec4(vCol,1.0); }`;
+
+function program(gl, vs, fs){
+  const mk=(t,s)=>{const o=gl.createShader(t); gl.shaderSource(o,s); gl.compileShader(o);
+    if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(o); return o;};
+  const p=gl.createProgram();
+  gl.attachShader(p,mk(gl.VERTEX_SHADER,vs)); gl.attachShader(p,mk(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw gl.getProgramInfoLog(p);
+  return p;
+}
+
+/* -------------------------------------------------------------------- main */
+let gl, progPts, progLine, bufPts, bufLine, nPts=0, nLine=0;
+let cam={theta:Math.PI*0.75, phi:0.42, dist:60, tx:0, ty:0, tz:0};
+let frame=0, playing=false, lastT=0, blobUrls=[];
+let bytes, activeCam=null, typeOn={}, selIdx=null, selId=null;
+
+const $ = s => document.querySelector(s);
+
+function initGL(){
+  const c = $("#gl");
+  gl = c.getContext("webgl", {antialias:true, alpha:false});
+  if(!gl){ $("#loading").textContent = "WebGL unavailable"; throw new Error("no webgl"); }
+  progPts  = program(gl, VS_PTS, FS_PTS);
+  progLine = program(gl, VS_LINE, FS_LINE);
+  bufPts = gl.createBuffer(); bufLine = gl.createBuffer();
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0,0,0,1);
+  resize();
+}
+
+function resize(){
+  const c=$("#gl"), dpr=Math.min(devicePixelRatio||1, 2);
+  const w=c.clientWidth, h=c.clientHeight;
+  if(c.width!==w*dpr || c.height!==h*dpr){ c.width=w*dpr; c.height=h*dpr; }
+  gl.viewport(0,0,c.width,c.height);
+}
+
+/* ---- geometry builders ---------------------------------------------- */
+function boxEdges(b){
+  const [cx,cy,cz]=b.c, [L,W,H]=b.s, hd=b.h;
+  const co=Math.cos(hd), si=Math.sin(hd), out=[];
+  const corner=(sx,sy,sz)=>{
+    const x=sx*L/2, y=sy*W/2;
+    return [cx + x*co - y*si, cy + x*si + y*co, cz + sz*H/2];
+  };
+  const v=[corner(1,1,-1),corner(1,-1,-1),corner(-1,-1,-1),corner(-1,1,-1),
+           corner(1,1, 1),corner(1,-1, 1),corner(-1,-1, 1),corner(-1,1, 1)];
+  const E=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7],
+           [0,5],[1,4]];   // last two: an X on the front face = heading indicator
+  for(const [a,z] of E) out.push(v[a], v[z]);
+  return out;
+}
+
+/* ---- picking ---------------------------------------------------------- */
+function camEye(){
+  return [cam.tx + cam.dist*Math.cos(cam.phi)*Math.cos(cam.theta),
+          cam.ty + cam.dist*Math.cos(cam.phi)*Math.sin(cam.theta),
+          cam.tz + cam.dist*Math.sin(cam.phi)];
+}
+
+/** Screen point -> world ray. Built from the camera basis directly, which
+ *  avoids needing a 4x4 inverse just for this. */
+function pickRay(mx, my){
+  const c = $("#gl"), r = c.getBoundingClientRect();
+  const nx = ((mx - r.left)/r.width)*2 - 1;
+  const ny = 1 - ((my - r.top)/r.height)*2;
+  const eye = camEye();
+  const fwd = norm(sub([cam.tx,cam.ty,cam.tz], eye));
+  const rt  = norm(cross(fwd, [0,0,1]));
+  const up  = cross(rt, fwd);
+  const tf  = Math.tan(Math.PI/8), asp = c.width/c.height;   // fov is PI/4
+  const d = norm([fwd[0] + rt[0]*nx*tf*asp + up[0]*ny*tf,
+                  fwd[1] + rt[1]*nx*tf*asp + up[1]*ny*tf,
+                  fwd[2] + rt[2]*nx*tf*asp + up[2]*ny*tf]);
+  return [eye, d];
+}
+
+/** World point -> box-local frame (undo heading rotation about z). */
+function toLocal(p, b){
+  const co = Math.cos(-b.h), si = Math.sin(-b.h);
+  const ox = p[0]-b.c[0], oy = p[1]-b.c[1];
+  return [ox*co - oy*si, ox*si + oy*co, p[2]-b.c[2]];
+}
+
+/** Ray vs oriented box. Returns hit distance along the ray, or null. */
+function rayBox(ro, rd, b){
+  const co = Math.cos(-b.h), si = Math.sin(-b.h);
+  const o = toLocal(ro, b);
+  const d = [rd[0]*co - rd[1]*si, rd[0]*si + rd[1]*co, rd[2]];
+  const h = [b.s[0]/2, b.s[1]/2, b.s[2]/2];
+  let tmin = -Infinity, tmax = Infinity;
+  for(let i=0;i<3;i++){
+    if(Math.abs(d[i]) < 1e-9){ if(Math.abs(o[i]) > h[i]) return null; continue; }
+    let t1 = (-h[i]-o[i])/d[i], t2 = (h[i]-o[i])/d[i];
+    if(t1 > t2){ const t=t1; t1=t2; t2=t; }
+    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+    if(tmin > tmax) return null;
+  }
+  return tmax < 0 ? null : (tmin > 0 ? tmin : tmax);
+}
+
+function pickAt(mx, my){
+  const [ro, rd] = pickRay(mx, my);
+  let best = null, bt = Infinity;
+  META.frames[frame].b.forEach((b, i) => {
+    if(!typeOn[b.t]) return;
+    const t = rayBox(ro, rd, b);
+    if(t !== null && t < bt){ bt = t; best = i; }
+  });
+  return best;
+}
+
+/** Shortest distance from the ego origin to the box surface (0 if inside). */
+function surfaceDist(b){
+  const p = toLocal([0,0,0], b);
+  const h = [b.s[0]/2, b.s[1]/2, b.s[2]/2];
+  let s = 0;
+  for(let i=0;i<3;i++){
+    const over = Math.abs(p[i]) - h[i];
+    if(over > 0) s += over*over;
+  }
+  return Math.sqrt(s);
+}
+
+function select(i){
+  const b = i === null ? null : META.frames[frame].b[i];
+  selIdx = i;
+  selId = b && b.i ? b.i : null;
+  renderSelection();
+  loadFrame(frame);                       // rebuild lines so the highlight shows
+}
+
+function renderSelection(){
+  const el = $("#sel");
+  const b = selIdx === null ? null : META.frames[frame].b[selIdx];
+  if(!b){ el.innerHTML = `<span class="none">click a box in the 3D view</span>`; return; }
+  const [cx, cy, cz] = b.c;
+  const range3d = Math.hypot(cx, cy, cz);
+  const ground  = Math.hypot(cx, cy);
+  const rows = [
+    ["ground range", `${ground.toFixed(2)} m`],
+    ["3D range",     `${range3d.toFixed(2)} m`],
+    ["nearest face", `${surfaceDist(b).toFixed(2)} m`],
+    ["forward x",    `${cx >= 0 ? "+" : ""}${cx.toFixed(2)} m`],
+    ["lateral y",    `${cy >= 0 ? "+" : ""}${cy.toFixed(2)} m  ${cy >= 0 ? "(left)" : "(right)"}`],
+    ["height z",     `${cz >= 0 ? "+" : ""}${cz.toFixed(2)} m`],
+    ["size l·w·h",   b.s.map(v=>v.toFixed(2)).join(" · ") + " m"],
+    ["heading",      `${(b.h*180/Math.PI).toFixed(1)}°`],
+    ["lidar points", b.n.toLocaleString()],
+  ];
+  if(b.v !== undefined) rows.push(["speed", `${b.v.toFixed(2)} m/s (${(b.v*3.6).toFixed(1)} km/h)`]);
+  if(b.i) rows.push(["id", `<span style="font-size:10px">${b.i}</span>`]);
+  el.innerHTML =
+    `<div><span class="big">${ground.toFixed(1)} m</span> `+
+    `<span style="color:${hex(TYPE_COL[b.t]||TYPE_COL[0])}">${TYPE[b.t].toLowerCase()}</span></div>`+
+    `<table>${rows.map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
+}
+
+function grid(){
+  const out=[], N=60, S=5, col=[0.105,0.13,0.155];
+  for(let i=-N; i<=N; i+=S){
+    out.push([[i,-N,0],[i,N,0],col],[[-N,i,0],[N,i,0],col]);
+  }
+  // vehicle body outline, roughly a Waymo Pacifica footprint
+  const ax=[0.9,0.15,0.15];
+  const car=[[-1.1,-1.0,0],[4.0,-1.0,0],[4.0,1.0,0],[-1.1,1.0,0]];
+  for(let i=0;i<4;i++) out.push([car[i], car[(i+1)%4], ax]);
+  out.push([[0,0,0],[3,0,0],[0.9,0.3,0.3]]);   // +x forward
+  out.push([[0,0,0],[0,3,0],[0.3,0.9,0.3]]);   // +y left
+  out.push([[0,0,0],[0,0,2],[0.3,0.5,0.9]]);   // +z up
+  return out;
+}
+const GRID = grid();
+
+/* ---- per-frame upload ------------------------------------------------ */
+function loadFrame(i){
+  frame = Math.max(0, Math.min(META.frames.length-1, i));
+  const F = META.frames[frame];
+
+  // Follow the selected object across frames when the export carries ids.
+  // Older exports have none, so fall back to dropping the selection.
+  if(selId !== null){
+    const j = F.b.findIndex(b => b.i === selId);
+    selIdx = j >= 0 ? j : null;
+  } else if(selIdx !== null && selIdx >= F.b.length){
+    selIdx = null;
+  }
+
+  // points: interleaved 12-byte stride laid down by the exporter
+  const sub = bytes.subarray(F.po, F.po + F.pn*12);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPts);
+  gl.bufferData(gl.ARRAY_BUFFER, sub, gl.DYNAMIC_DRAW);
+  nPts = F.pn;
+
+  // lines: grid + boxes, rebuilt each frame (a few thousand verts, cheap)
+  const verts=[];
+  for(const [a,b,c] of GRID) verts.push(a[0],a[1],a[2],c[0],c[1],c[2], b[0],b[1],b[2],c[0],c[1],c[2]);
+  F.b.forEach((b, i) => {
+    if(!typeOn[b.t]) return;
+    const col = (i === selIdx) ? [1,1,1] : (TYPE_COL[b.t] || TYPE_COL[0]);
+    for(const p of boxEdges(b)) verts.push(p[0],p[1],p[2], col[0],col[1],col[2]);
+    if(i === selIdx){                       // ray from ego origin to the box
+      verts.push(0,0,0, 1,1,1, b.c[0],b.c[1],b.c[2], 1,1,1);
+    }
+  });
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLine);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+  nLine = verts.length/6;
+
+  $("#seek").value = frame;
+  drawImage();
+  updateHUD();
+  draw();
+}
+
+function updateHUD(){
+  const F = META.frames[frame];
+  const counts = {};
+  for(const b of F.b) counts[TYPE[b.t]] = (counts[TYPE[b.t]]||0)+1;
+  $("#hud").innerHTML =
+    `frame <b>${frame+1}</b>/${META.frames.length} &nbsp; t=<b>${(F.t-META.t0).toFixed(2)}s</b><br>`+
+    `points <b>${F.pn.toLocaleString()}</b> (of ${F.ptotal.toLocaleString()})<br>`+
+    `boxes <b>${F.b.length}</b> &nbsp; ${Object.entries(counts).map(([k,v])=>k.toLowerCase()+" "+v).join(" · ")}`;
+  $("#tlabel").textContent = `${(F.t-META.t0).toFixed(2)}s / ${META.dur.toFixed(2)}s`;
+
+  const rows = F.b.map((b,i)=>[b,i]).sort((a,b)=>b[0].n-a[0].n).map(([b,i])=>
+    `<div data-i="${i}" class="${i===selIdx?'sel':''}">`+
+    `<span style="color:${hex(TYPE_COL[b.t]||TYPE_COL[0])}">${TYPE[b.t].toLowerCase()}</span>`+
+    `<span>${b.n} pts · ${Math.hypot(b.c[0],b.c[1]).toFixed(0)} m</span></div>`).join("");
+  $("#objs").innerHTML = rows || `<span style="color:var(--dim)">none</span>`;
+  renderSelection();
+}
+
+/* ---- camera image ---------------------------------------------------- */
+function drawImage(){
+  const F = META.frames[frame], c = $("#img"), ctx = c.getContext("2d");
+  const rec = F.im && F.im[activeCam];
+  if(!rec){ c.width=16; c.height=9; ctx.clearRect(0,0,16,9); return; }
+  const im = imgCache(frame, activeCam, rec);
+  const paint = () => {
+    c.width = rec[2]; c.height = rec[3];
+    ctx.drawImage(im, 0, 0, c.width, c.height);
+    const src = $("#src2d").value;
+    if(src === "none") return;
+    const boxes = (src === "native" ? F.b2 : F.b2p)[activeCam] || [];
+    const sx = c.width / META.cams[activeCam].w;
+    ctx.lineWidth = Math.max(1, c.width/420);
+    ctx.font = `${Math.max(9, c.width/48)}px ui-monospace,monospace`;
+    for(const b of boxes){
+      if(!typeOn[b[4]]) continue;
+      ctx.strokeStyle = hex(TYPE_COL[b[4]] || TYPE_COL[0]);
+      ctx.strokeRect((b[0]-b[2]/2)*sx, (b[1]-b[3]/2)*sx, b[2]*sx, b[3]*sx);
+    }
+  };
+  if(im.complete) paint(); else im.onload = paint;
+}
+
+const _imgs = new Map();
+function imgCache(fi, name, rec){
+  const key = fi+"/"+name;
+  let im = _imgs.get(key);
+  if(!im){
+    const blob = new Blob([bytes.subarray(rec[0], rec[0]+rec[1])], {type:"image/jpeg"});
+    im = new Image();
+    im.src = URL.createObjectURL(blob);
+    _imgs.set(key, im);
+    if(_imgs.size > 60){                       // keep the working set bounded
+      const [k, old] = _imgs.entries().next().value;
+      URL.revokeObjectURL(old.src); _imgs.delete(k);
+    }
+  }
+  return im;
+}
+
+/* ---- render ---------------------------------------------------------- */
+function draw(){
+  resize();
+  const c = $("#gl");
+  const eye = [
+    cam.tx + cam.dist*Math.cos(cam.phi)*Math.cos(cam.theta),
+    cam.ty + cam.dist*Math.cos(cam.phi)*Math.sin(cam.theta),
+    cam.tz + cam.dist*Math.sin(cam.phi)];
+  const mvp = M.mul(M.perspective(Math.PI/4, c.width/c.height, 0.3, 500),
+                    M.lookAt(eye, [cam.tx,cam.ty,cam.tz], [0,0,1]));
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  // lines
+  gl.useProgram(progLine);
+  gl.uniformMatrix4fv(gl.getUniformLocation(progLine,"uMVP"), false, mvp);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufLine);
+  let a = gl.getAttribLocation(progLine,"aPos");
+  gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a,3,gl.FLOAT,false,24,0);
+  let b = gl.getAttribLocation(progLine,"aCol");
+  gl.enableVertexAttribArray(b); gl.vertexAttribPointer(b,3,gl.FLOAT,false,24,12);
+  gl.drawArrays(gl.LINES, 0, nLine);
+
+  // points
+  gl.useProgram(progPts);
+  gl.uniformMatrix4fv(gl.getUniformLocation(progPts,"uMVP"), false, mvp);
+  gl.uniform1f(gl.getUniformLocation(progPts,"uMode"), +$("#mode").value);
+  gl.uniform1f(gl.getUniformLocation(progPts,"uSize"), +$("#psize").value);
+  gl.uniform1f(gl.getUniformLocation(progPts,"uGain"), +$("#gain").value);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPts);
+  const ap = gl.getAttribLocation(progPts,"aPos");
+  gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap,3,gl.SHORT,false,12,0);
+  const ai = gl.getAttribLocation(progPts,"aIE");
+  gl.enableVertexAttribArray(ai); gl.vertexAttribPointer(ai,2,gl.UNSIGNED_BYTE,true,12,6);
+  const ac = gl.getAttribLocation(progPts,"aRGB");
+  gl.enableVertexAttribArray(ac); gl.vertexAttribPointer(ac,3,gl.UNSIGNED_BYTE,true,12,8);
+  gl.drawArrays(gl.POINTS, 0, nPts);
+}
+
+/* ---- input ----------------------------------------------------------- */
+function bindInput(){
+  const c = $("#gl");
+  let drag=null;
+  c.addEventListener("mousedown", e =>
+    drag={x:e.clientX, y:e.clientY, moved:0, pan:e.shiftKey||e.button===2});
+  addEventListener("mouseup", e => {
+    // A click is a mouseup that barely moved; anything else was a camera drag.
+    if(drag && drag.moved < 5 && e.button === 0) select(pickAt(e.clientX, e.clientY));
+    drag = null;
+  });
+  addEventListener("mousemove", e => {
+    if(!drag) return;
+    const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+    drag.x=e.clientX; drag.y=e.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    if(drag.pan){
+      const s=cam.dist*0.0016;
+      cam.tx += -dx*s*Math.sin(cam.theta) - dy*s*Math.cos(cam.theta)*Math.sin(cam.phi);
+      cam.ty +=  dx*s*Math.cos(cam.theta) - dy*s*Math.sin(cam.theta)*Math.sin(cam.phi);
+      cam.tz +=  dy*s*Math.cos(cam.phi);
+    } else {
+      cam.theta -= dx*0.006;
+      cam.phi = Math.max(-1.45, Math.min(1.45, cam.phi + dy*0.006));
+    }
+    draw();
+  });
+  c.addEventListener("contextmenu", e=>e.preventDefault());
+  c.addEventListener("wheel", e => {
+    e.preventDefault();
+    cam.dist = Math.max(3, Math.min(300, cam.dist * Math.exp(e.deltaY*0.0012)));
+    draw();
+  }, {passive:false});
+
+  addEventListener("keydown", e => {
+    if(e.code==="Space"){ e.preventDefault(); togglePlay(); }
+    else if(e.code==="ArrowRight") loadFrame(frame+1);
+    else if(e.code==="ArrowLeft")  loadFrame(frame-1);
+    else if(e.key==="r"){ cam={theta:Math.PI*0.75,phi:0.42,dist:60,tx:0,ty:0,tz:0}; draw(); }
+    else if(/^[1-9]$/.test(e.key)){
+      const names = Object.keys(META.cams);
+      if(names[+e.key-1]) setCam(names[+e.key-1]);
+    }
+  });
+  addEventListener("resize", draw);
+
+  $("#objs").addEventListener("click", e => {
+    const row = e.target.closest("div[data-i]");
+    if(row) select(+row.dataset.i);
+  });
+  $("#seek").addEventListener("input", e => loadFrame(+e.target.value));
+  $("#play").addEventListener("click", togglePlay);
+  for(const id of ["#mode","#psize","#gain"]) $(id).addEventListener("input", draw);
+  $("#src2d").addEventListener("change", drawImage);
+}
+
+function togglePlay(){
+  playing = !playing;
+  $("#play").textContent = playing ? "❚❚" : "▶";
+  lastT = performance.now();
+  if(playing) requestAnimationFrame(tick);
+}
+function tick(t){
+  if(!playing) return;
+  if(t - lastT >= 100){                    // dataset is 10 Hz; play at 1x
+    lastT = t;
+    loadFrame(frame+1 >= META.frames.length ? 0 : frame+1);
+  }
+  requestAnimationFrame(tick);
+}
+
+function setCam(name){
+  activeCam = name;
+  for(const el of document.querySelectorAll("#camtabs button"))
+    el.classList.toggle("on", el.dataset.n === name);
+  drawImage();
+}
+
+function buildUI(){
+  const tabs = $("#camtabs");
+  for(const name of Object.keys(META.cams)){
+    const btn = document.createElement("button");
+    btn.textContent = name.replace("_"," "); btn.dataset.n = name;
+    btn.onclick = () => setCam(name);
+    tabs.appendChild(btn);
+  }
+  const chips = $("#typechips");
+  for(const t of META.types){
+    typeOn[t] = true;
+    const el = document.createElement("span");
+    el.className = "chip on"; el.textContent = TYPE[t].toLowerCase();
+    el.style.background = hex(TYPE_COL[t] || TYPE_COL[0]);
+    el.onclick = () => {
+      typeOn[t] = !typeOn[t];
+      el.classList.toggle("on", typeOn[t]);
+      el.style.background = typeOn[t] ? hex(TYPE_COL[t]||TYPE_COL[0]) : "var(--ctrl)";
+      el.style.color = typeOn[t] ? "#000" : "var(--dim)";
+      loadFrame(frame);
+    };
+    chips.appendChild(el);
+  }
+  $("#seek").max = META.frames.length - 1;
+  $("#meta").innerHTML = [
+    `segment ${META.name}`,
+    `${META.stats.time_of_day} · ${META.stats.location} · ${META.stats.weather}`,
+    `${META.frames.length} frames · ${META.dur.toFixed(1)}s · ${META.hz.toFixed(2)} Hz`,
+    `${META.subsample}`,
+  ].join("<br>");
+}
+
+(async function(){
+  if(IS_TEMPLATE){
+    $("#loading").innerHTML =
+      `<div style="text-align:center;line-height:1.9">`+
+      `<b style="color:var(--accent)">this file is the empty template</b><br>`+
+      `it holds no segment data. generate a viewer first:<br><br>`+
+      `<code style="background:#0c0f13;padding:7px 11px;border-radius:4px;display:inline-block">`+
+      `python3 waymo_viz.py path/to/segment-….tfrecord</code><br><br>`+
+      `then open the <code>…_viewer.html</code> it writes next to the .tfrecord</div>`;
+    return;
+  }
+  try{
+    bytes = decodePayload(PAYLOAD_B64);
+    initGL();
+    buildUI();
+    setCam(Object.keys(META.cams)[0]);
+    bindInput();
+    loadFrame(0);
+    $("#loading").remove();
+  }catch(err){
+    $("#loading").textContent = "load failed: " + err;
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
