@@ -3,6 +3,10 @@
 *_viewer.html
 *.tfrecord
 
+# Extracted training shards
+/cache/
+*.tar
+
 # Python
 __pycache__/
 *.py[cod]
