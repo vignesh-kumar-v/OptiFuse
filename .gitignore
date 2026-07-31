@@ -3,6 +3,10 @@
 *_viewer.html
 *.tfrecord
 
+# Extracted training shards (waymo_extract.py output)
+/cache/
+*.tar
+
 # Generated ML pipeline artifacts (regenerable from source + downloaded data)
 /data/datasets/
 /models/detection/runs/
