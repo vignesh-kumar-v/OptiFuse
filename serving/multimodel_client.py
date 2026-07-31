@@ -28,6 +28,7 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import distance as dist
 import preprocessing
 from preprocessing import FramePreprocessor
 
@@ -53,7 +54,7 @@ MODELS = {"detector": "vehicle_detector", "segmentation": "drivable_seg", "depth
 OUTPUTS = {"detector": "output0", "segmentation": "class_map", "depth": "depth"}
 INPUTS = {"detector": "images", "segmentation": "pixel_values", "depth": "pixel_values"}
 
-DEPTH_MIN, DEPTH_MAX = 2.0, 60.0
+DEPTH_MIN, DEPTH_MAX = 3.0, 80.0
 
 
 def make_inputs(name, tensor):
@@ -115,18 +116,42 @@ def decode_detections(raw, info, conf_thres):
     return det
 
 
-def boxes_svg(dets, disp_w, disp_h, info):
+def boxes_svg(dets, disp_w, disp_h, info, positions=None, lead=None):
+    """Boxes with a distance readout; the ego-lane lead object is emphasized.
+
+    The lead vehicle gets a thicker stroke and a large metre label -- that pairing
+    (which object, how far) is the thing an in-car display actually shows, and it
+    only exists because detection, depth and calibration are combined.
+    """
     sx, sy = disp_w / info.orig_w, disp_h / info.orig_h
     parts = []
-    for x1, y1, x2, y2, conf, cls in dets:
+    for i, (x1, y1, x2, y2, conf, cls) in enumerate(dets):
         c = DET_COLORS.get(int(cls), "#8a97a3")
-        x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+        is_lead = (lead is not None and i == lead)
+        X1, Y1, X2, Y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+        label = DET_CLASSES[int(cls)]
+        dist_txt = ""
+        if positions is not None:
+            fwd, lat, in_lane = positions[i]
+            if np.isfinite(fwd):
+                dist_txt = f"  {fwd:.1f}m"
+                if in_lane and not is_lead:
+                    label = "* " + label      # in our lane, but not the nearest
         parts.append(
-            f'<rect x="{x1:.1f}" y="{y1:.1f}" width="{x2-x1:.1f}" height="{y2-y1:.1f}" '
-            f'fill="none" stroke="{c}" stroke-width="2"/>'
-            f'<text x="{x1+2:.1f}" y="{max(10,y1-4):.1f}" fill="{c}" font-size="12" '
-            f'font-family="ui-monospace,monospace">{DET_CLASSES[int(cls)]} {conf:.2f}</text>')
+            f'<rect x="{X1:.1f}" y="{Y1:.1f}" width="{X2-X1:.1f}" height="{Y2-Y1:.1f}" '
+            f'fill="none" stroke="{c}" stroke-width="{4 if is_lead else 2}"/>'
+            f'<text x="{X1+2:.1f}" y="{max(10,Y1-4):.1f}" fill="{c}" '
+            f'font-size="{15 if is_lead else 12}" font-weight="{600 if is_lead else 400}" '
+            f'font-family="ui-monospace,monospace">{label} {conf:.2f}{dist_txt}</text>')
     return "".join(parts)
+
+
+def unletterbox(arr, info, interp):
+    """Model-space map -> source-image pixels, so it shares coordinates with boxes."""
+    h, w = arr.shape
+    inner = arr[info.pad_y:h - info.pad_y or None, info.pad_x:w - info.pad_x or None]
+    return cv2.resize(inner.astype(np.float32) if inner.dtype == np.float16 else inner,
+                      (info.orig_w, info.orig_h), interpolation=interp)
 
 
 def seg_overlay(class_map, im_bgr, info, disp_w, disp_h, alpha=0.45):
@@ -150,24 +175,44 @@ def seg_overlay(class_map, im_bgr, info, disp_w, disp_h, alpha=0.45):
     return out, frac
 
 
-def depth_panel(depth, im_bgr, info, disp_w, disp_h):
-    """Un-letterbox depth and colorize with a monotonic-lightness ramp.
+def depth_panel(depth_full, im_bgr, disp_w, disp_h, positions=None, dets=None, lead=None):
+    """Colorize depth with a monotonic-lightness ramp, over a driving-relevant range.
 
     A multi-hue ramp is used rather than a single hue because depth is the
     documented "semantic heat" exception -- and it ships with a metre scale
     legend in the viewer, which that exception requires. MAGMA is chosen over
     JET specifically because its lightness increases monotonically; JET's does
     not, which invents banding that is not in the data.
+
+    Range and curve were both chosen by looking at the output. A linear 2-60m
+    ramp spent most of its colour on sky and read as washed out; clamping to
+    45m then drove a whole urban street (which runs past 60m) to flat black.
+    3-80m with a sqrt curve keeps the far end resolvable while still giving the
+    near half -- where a metre actually matters -- most of the colour range.
     """
-    h, w = depth.shape
-    inner = depth[info.pad_y:h - info.pad_y or None, info.pad_x:w - info.pad_x or None]
-    # The engine emits FP16; cv2.resize has no float16 kernel, so widen first.
-    inner = cv2.resize(inner.astype(np.float32), (disp_w, disp_h),
-                       interpolation=cv2.INTER_LINEAR)
+    inner = cv2.resize(depth_full, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
     norm = np.clip((inner - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN), 0, 1)
-    # near = bright: invert so close surfaces read as "hot"
-    u8 = ((1.0 - norm) * 255).astype(np.uint8)
-    return cv2.applyColorMap(u8, cv2.COLORMAP_MAGMA), float(inner.min()), float(inner.max())
+    # sqrt expands the near half of the range, where a metre matters most
+    norm = np.sqrt(norm)
+    u8 = ((1.0 - norm) * 255).astype(np.uint8)   # near = bright
+    panel = cv2.applyColorMap(u8, cv2.COLORMAP_MAGMA)
+
+    # Mark the objects on the depth panel too, so the number can be traced to a
+    # surface rather than being a bare readout.
+    if dets is not None and positions is not None:
+        sx, sy = disp_w / im_bgr.shape[1], disp_h / im_bgr.shape[0]
+        for i, (x1, y1, x2, y2, _c, _cls) in enumerate(dets):
+            fwd = positions[i][0]
+            if not np.isfinite(fwd):
+                continue
+            p1 = (int(x1 * sx), int(y1 * sy))
+            p2 = (int(x2 * sx), int(y2 * sy))
+            is_lead = (lead is not None and i == lead)
+            cv2.rectangle(panel, p1, p2, (255, 255, 255), 2 if is_lead else 1)
+            cv2.putText(panel, f"{fwd:.1f}m", (p1[0], max(11, p1[1] - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42 if is_lead else 0.36,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+    return panel
 
 
 def jpg_b64(im_bgr, quality=82):
@@ -220,6 +265,8 @@ def main():
         if len(frames) >= args.limit:
             break
         F = wl.Frame(payload)
+        calib = F.camera_calibrations()[args.camera]
+        intrinsic, extrinsic = calib["intrinsic"], calib["extrinsic"]
         for im in F.images():
             if im["name"] != args.camera:
                 continue
@@ -251,22 +298,33 @@ def main():
             det_info = batch["detector"][1]
             dets = decode_detections(res["detector"], det_info, args.conf_thres)
 
+            # Fuse: depth back to source pixels, then metres + lateral offset per
+            # detection via the camera calibration. This is where three separate
+            # models become one perception output.
+            depth_full = unletterbox(res["depth"][0], batch["depth"][1], cv2.INTER_LINEAR)
+            positions = dist.object_positions(dets[:, :4], depth_full, intrinsic, extrinsic) \
+                if len(dets) else []
+            lead = dist.lead_object(positions) if positions else None
+
             disp_w = args.img_width
             disp_h = round(det_info.orig_h * disp_w / det_info.orig_w)
 
             rgb_panel = cv2.resize(im_bgr, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
             seg_img, seg_frac = seg_overlay(res["segmentation"][0], im_bgr,
                                             batch["segmentation"][1], disp_w, disp_h)
-            dep_img, dmin, dmax = depth_panel(res["depth"][0], im_bgr,
-                                              batch["depth"][1], disp_w, disp_h)
+            dep_img = depth_panel(depth_full, im_bgr, disp_w, disp_h, positions, dets, lead)
 
             frames.append({
                 "frame": i, "t": round(F.timestamp, 3), "w": disp_w, "h": disp_h,
                 "rgb": jpg_b64(rgb_panel), "seg": jpg_b64(seg_img), "depth": jpg_b64(dep_img),
-                "svg": boxes_svg(dets, disp_w, disp_h, det_info),
+                "svg": boxes_svg(dets, disp_w, disp_h, det_info, positions, lead),
                 "n_det": int(len(dets)),
                 "seg_frac": {k: round(v, 4) for k, v in seg_frac.items()},
-                "depth_range": [round(dmin, 1), round(dmax, 1)],
+                "lead": (None if lead is None else
+                         {"m": round(positions[lead][0], 1),
+                          "lat": round(positions[lead][1], 2),
+                          "cls": DET_CLASSES[int(dets[lead][5])]}),
+                "in_lane": int(sum(1 for p in positions if p[2])),
                 "ms": round(lat_concurrent[-1], 2),
             })
             if len(frames) % 10 == 0:
