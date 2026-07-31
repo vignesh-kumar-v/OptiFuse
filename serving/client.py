@@ -28,6 +28,9 @@ import cv2
 import numpy as np
 import tritonclient.grpc as grpcclient
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import preprocessing
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import waymo_lib as wl
 
@@ -44,30 +47,22 @@ DEFAULT_TFRECORD = os.path.join(
     "segment-10689101165701914459_2072_300_2092_300_with_camera_labels.tfrecord")
 
 
-def letterbox(im_bgr, size, pad_value=114):
-    """Replicates ultralytics.data.augment.LetterBox(auto=False, scaleup=True,
-    center=True, padding_value=114) -- the exact preprocessing the model was
-    trained and export-validated with. Verified to match Ultralytics'
-    predictor.preprocess() output to float32 rounding precision (~6e-8) during
-    development; this client has no torch/ultralytics dependency at runtime.
+def letterbox(im_bgr, size, pad_value=preprocessing.PAD_VALUE):
+    """Thin shim over preprocessing.letterbox, kept so this module's existing
+    (int size) -> (padded, ratio, (px, py)) signature still holds.
+
+    The implementation lives in serving/preprocessing.py as the single source of
+    truth -- it is shared with the segmentation and depth paths, and is the piece
+    verified to match Ultralytics to 5.96e-08. Duplicating it here is exactly how
+    train/serve skew creeps in.
     """
-    h, w = im_bgr.shape[:2]
-    r = min(size / h, size / w)
-    new_w, new_h = round(w * r), round(h * r)
-    dw, dh = (size - new_w) / 2, (size - new_h) / 2
-    top, bottom = round(dh - 0.1), round(dh + 0.1)
-    left, right = round(dw - 0.1), round(dw + 0.1)
-    resized = cv2.resize(im_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT,
-                                value=(pad_value,) * 3)
-    return padded, r, (left, top)
+    padded, info = preprocessing.letterbox(im_bgr, (size, size), pad_value)
+    return padded, info.ratio, (info.pad_x, info.pad_y)
 
 
 def preprocess(im_bgr, size):
-    padded, ratio, pad = letterbox(im_bgr, size)
-    rgb = padded[..., ::-1]
-    chw = rgb.transpose(2, 0, 1).astype(np.float16) / 255.0
-    return np.ascontiguousarray(chw[None]), ratio, pad
+    tensor, info = preprocessing.preprocess(im_bgr, (size, size), dtype=np.float16)
+    return tensor, info.ratio, (info.pad_x, info.pad_y)
 
 
 def postprocess(raw, ratio, pad, orig_w, orig_h, conf_thres):

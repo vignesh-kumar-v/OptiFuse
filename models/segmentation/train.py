@@ -32,6 +32,13 @@ from waymo_dataset import IGNORE_INDEX, WaymoImages
 
 CLASS_NAMES = ["background", "road", "marking", "sidewalk"]
 
+# SegformerImageProcessor for this checkpoint has do_rescale=1/255 AND
+# do_normalize=True with these ImageNet statistics. Feeding plain 0-1 pixels
+# would shift the input distribution away from what the pretrained Cityscapes
+# encoder expects and quietly weaken transfer, so apply both.
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
+
 # Waymo CameraSegmentation semantic id -> our class index. Everything not listed
 # collapses to 0/background. 255 (letterbox padding) is preserved as ignore.
 WAYMO_TO_OURS = {20: 1, 21: 2, 22: 2, 23: 3}
@@ -63,9 +70,10 @@ class SegSamples(IterableDataset):
         ds = WaymoImages(os.path.dirname(shards[0]), task="segmentation",
                          size=self.size, shards=shards)
         for s in ds:
-            img = torch.from_numpy(s["image"].transpose(2, 0, 1).copy()).float() / 255.0
+            img = s["image"].astype(np.float32) / 255.0
+            img = (img - IMAGENET_MEAN) / IMAGENET_STD
             lbl = torch.from_numpy(LUT[s["semantic"]].astype(np.int64))
-            yield img, lbl
+            yield torch.from_numpy(img.transpose(2, 0, 1).copy()), lbl
 
 
 def dice_loss(logits, target, n_classes, valid):
