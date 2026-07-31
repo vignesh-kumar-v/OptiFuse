@@ -1,0 +1,41 @@
+# Monocular metric depth. Depth Anything V2 (Metric, Outdoor) fine-tuned on
+# Waymo sparse lidar depth, FP16 TensorRT engine.
+# Shapes/dtypes verified against the exported ONNX graph:
+#   input  "pixel_values" FP16 [1, 3, 644, 966]   plain 0-1 RGB
+#   output "depth"        FP16 [1, 644, 966]      metres
+#
+# 644x966 rather than a rounder size because the DINOv2 backbone tiles the input
+# into 14x14 patches, so both dims must be multiples of 14. It also happens to
+# match Waymo's 1920x1280 frames at a 0.5031 scale on both axes, so the
+# FRONT-family cameras letterbox in with essentially no padding.
+#
+# The graph bakes in ImageNet normalization and emits depth already resized to
+# input resolution, so the client sends plain 0-1 RGB and gets metres back.
+name: "depth_estimator"
+platform: "tensorrt_plan"
+
+# Batch dimension is baked into the engine as a literal 1, so Triton must not
+# prepend its own. max_batch_size: 0 means "dims below are the complete shape".
+max_batch_size: 0
+
+input [
+  {
+    name: "pixel_values"
+    data_type: TYPE_FP16
+    dims: [ 1, 3, 644, 966 ]
+  }
+]
+output [
+  {
+    name: "depth"
+    data_type: TYPE_FP16
+    dims: [ 1, 644, 966 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]

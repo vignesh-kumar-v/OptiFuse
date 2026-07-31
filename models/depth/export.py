@@ -48,7 +48,12 @@ class DepthForExport(torch.nn.Module):
             d = d.unsqueeze(1)
         if d.shape[-2:] != self.out_hw:
             d = F.interpolate(d, size=self.out_hw, mode="bilinear", align_corners=False)
-        return d.squeeze(1)
+        # reshape to literal ints rather than squeeze(1): squeeze leaves the
+        # exported graph with symbolic output dims ("Squeezedepth_dim_0"), which
+        # TensorRT will not bind to a static engine without an optimization
+        # profile. Concrete ints keep the output shape fixed at [1, H, W].
+        h, w = self.out_hw
+        return d.reshape(1, int(h), int(w))
 
 
 def main():

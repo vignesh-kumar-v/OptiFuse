@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OptiFuse multi-model perception</title>
+<style>
+  :root{
+    --bg:#000; --panel:#000; --ctrl:#0c0f13; --line:#1d232b;
+    --text-primary:#dde3ea; --text-secondary:#8b97a3; --text-muted:#5d6772;
+    --accent:#4ade80;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--text-primary); overflow:hidden;
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:grid; grid-template-rows:1fr auto;
+  }
+  #main{display:grid; grid-template-columns:1fr 300px; min-height:0}
+  #panels{display:grid; grid-template-rows:1fr 1fr 1fr; gap:6px; padding:6px; min-height:0; min-width:0}
+  .panel{position:relative; min-height:0; display:flex; align-items:center; justify-content:center; background:#000}
+  .panel img{max-width:100%; max-height:100%; display:block}
+  .panel svg{position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none}
+  .wrap{position:relative; max-width:100%; max-height:100%}
+  .tag{
+    position:absolute; top:6px; left:8px; font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; color:var(--text-secondary); text-shadow:0 1px 3px #000;
+    pointer-events:none;
+  }
+  #side{background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:12px}
+  h4{margin:16px 0 7px; font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.09em}
+  h4:first-child{margin-top:0}
+  .row{display:flex; justify-content:space-between; gap:8px; padding:2px 0; font-size:12px}
+  .row span:last-child{color:var(--text-primary)}
+  .row span:first-child{color:var(--text-secondary)}
+  .key{display:flex; align-items:center; gap:7px; padding:2px 0; font-size:12px; color:var(--text-secondary)}
+  .sw{width:11px; height:11px; border-radius:2px; flex:0 0 auto}
+  .swline{width:11px; height:0; border-top:2px solid; flex:0 0 auto}
+  /* Depth scale: the metre legend the semantic-heat ramp is required to ship with. */
+  #depthbar{height:10px; border-radius:2px; margin-top:5px;
+    background:linear-gradient(90deg,#fcfdbf,#fe9f6d,#de4968,#8c2981,#3b0f70,#000004)}
+  #depthlbl{display:flex; justify-content:space-between; color:var(--text-muted); font-size:10px; margin-top:3px}
+  #bar{display:flex; align-items:center; gap:12px; padding:8px 14px; background:var(--panel); border-top:1px solid var(--line)}
+  #bar button{width:34px; height:28px; font:inherit; cursor:pointer; border-radius:4px;
+    background:var(--ctrl); color:var(--text-primary); border:1px solid var(--line)}
+  #seek{flex:1; accent-color:var(--accent)}
+  #tlabel{color:var(--text-secondary); min-width:150px; text-align:right; font-size:11px}
+  .big{font-size:19px; color:var(--accent); font-weight:600; letter-spacing:-.02em}
+</style>
+</head>
+<body>
+<div id="main">
+  <div id="panels">
+    <div class="panel"><div class="wrap"><img id="p-rgb"><svg id="p-svg"></svg><div class="tag">detection</div></div></div>
+    <div class="panel"><div class="wrap"><img id="p-seg"><div class="tag">drivable area + markings</div></div></div>
+    <div class="panel"><div class="wrap"><img id="p-depth"><div class="tag">metric depth</div></div></div>
+  </div>
+  <div id="side">
+    <h4>Frame</h4>
+    <div class="row"><span>index</span><span id="s-idx"></span></div>
+    <div class="row"><span>time</span><span id="s-t"></span></div>
+    <div class="row"><span>detections</span><span id="s-ndet"></span></div>
+    <div class="row"><span>round trip</span><span id="s-ms"></span></div>
+
+    <h4>Detection classes</h4>
+    <div id="det-legend"></div>
+
+    <h4>Segmentation</h4>
+    <div id="seg-legend"></div>
+    <div id="seg-frac" style="margin-top:6px"></div>
+
+    <h4>Depth (metres)</h4>
+    <div id="depthbar"></div>
+    <div id="depthlbl"><span id="d-near"></span><span id="d-far"></span></div>
+    <div class="row" style="margin-top:6px"><span>this frame</span><span id="s-drange"></span></div>
+
+    <h4>Concurrency</h4>
+    <div id="bench"></div>
+
+    <h4>Per-model latency</h4>
+    <div id="permodel"></div>
+
+    <h4>Run</h4>
+    <div class="row"><span>segment</span><span id="s-seg" style="font-size:10px"></span></div>
+    <div class="row"><span>camera</span><span id="s-cam"></span></div>
+    <div class="row"><span>frames</span><span id="s-n"></span></div>
+    <div class="row"><span>conf thr</span><span id="s-conf"></span></div>
+  </div>
+</div>
+<div id="bar">
+  <button id="prev">&lt;</button>
+  <button id="play">&#9654;</button>
+  <button id="next">&gt;</button>
+  <input id="seek" type="range" min="0" value="0">
+  <span id="tlabel"></span>
+</div>
+<script>
+const META = /*__META__*/ null;
+const FRAMES = /*__FRAMES__*/ null;
+
+let idx = 0, playing = false, timer = null;
+const $ = id => document.getElementById(id);
+
+function render(){
+  const f = FRAMES[idx];
+  $("p-rgb").src   = "data:image/jpeg;base64," + f.rgb;
+  $("p-seg").src   = "data:image/jpeg;base64," + f.seg;
+  $("p-depth").src = "data:image/jpeg;base64," + f.depth;
+  const svg = $("p-svg");
+  svg.setAttribute("viewBox", `0 0 ${f.w} ${f.h}`);
+  svg.innerHTML = f.svg;
+
+  $("s-idx").textContent = f.frame;
+  $("s-t").textContent = f.t.toFixed(2) + "s";
+  $("s-ndet").textContent = f.n_det;
+  $("s-ms").textContent = f.ms + " ms";
+  $("s-drange").textContent = f.depth_range[0] + "-" + f.depth_range[1] + " m";
+
+  $("seg-frac").innerHTML = Object.entries(f.seg_frac).map(([k,v]) =>
+    `<div class="row"><span>${k}</span><span>${(v*100).toFixed(1)}%</span></div>`).join("");
+
+  $("seek").value = idx;
+  $("tlabel").textContent = `${idx+1} / ${FRAMES.length}`;
+}
+
+function step(d){ idx = Math.max(0, Math.min(FRAMES.length-1, idx+d)); render(); }
+$("prev").onclick = () => { stop(); step(-1); };
+$("next").onclick = () => { stop(); step(1); };
+$("seek").oninput = () => { stop(); idx = +$("seek").value; render(); };
+function play(){ playing = true; $("play").innerHTML = "&#10074;&#10074;";
+  timer = setInterval(() => { if (idx >= FRAMES.length-1) { stop(); return; } step(1); }, 160); }
+function stop(){ playing = false; $("play").innerHTML = "&#9654;"; clearInterval(timer); }
+$("play").onclick = () => playing ? stop() : play();
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { stop(); step(1); }
+  if (e.key === "ArrowLeft")  { stop(); step(-1); }
+  if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
+});
+
+function init(){
+  // Identity is never colour-alone: every class ships a swatch AND its name.
+  $("det-legend").innerHTML = META.det_classes.map((n,i) =>
+    `<div class="key"><span class="swline" style="border-color:${META.det_colors[i]}"></span>${n}</div>`).join("");
+  $("seg-legend").innerHTML = Object.entries(META.seg_colors).map(([i,c]) =>
+    `<div class="key"><span class="sw" style="background:${c}"></span>${META.seg_classes[i]}</div>`).join("");
+
+  $("d-near").textContent = META.depth_min + " m (near)";
+  $("d-far").textContent  = META.depth_max + " m (far)";
+
+  $("bench").innerHTML = META.benchmark
+    ? `<div class="row"><span>serial</span><span>${META.benchmark.serial_ms.toFixed(1)} ms</span></div>`
+    + `<div class="row"><span>concurrent</span><span>${META.benchmark.concurrent_ms.toFixed(1)} ms</span></div>`
+    + `<div class="row" style="margin-top:4px"><span>speedup</span><span class="big">${META.benchmark.speedup.toFixed(2)}x</span></div>`
+    : `<div class="row"><span>not measured</span><span>-</span></div>`;
+
+  $("permodel").innerHTML = Object.entries(META.per_model_ms).map(([k,v]) =>
+    `<div class="row"><span>${k}</span><span>${v} ms</span></div>`).join("");
+
+  $("s-seg").textContent = META.segment.replace("segment-","").slice(0,22);
+  $("s-cam").textContent = META.camera;
+  $("s-n").textContent = META.n_frames;
+  $("s-conf").textContent = META.conf_thres;
+
+  $("seek").max = FRAMES.length - 1;
+  render();
+}
+init();
+</script>
+</body>
+</html>

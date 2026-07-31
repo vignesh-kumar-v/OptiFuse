@@ -13,11 +13,12 @@
 # Pretrained base checkpoints -- auto-downloaded on first train.py run
 /models/detection/*.pt
 /serving/triton_repo/*/[0-9]*/
-/serving/build_engine.log
-# Any client.py output viewer, whatever --out name was used -- keep only the
-# hand-authored template.
+/serving/build_engine*.log
+# Client output viewers, whatever --out name was used -- keep the hand-authored
+# templates (which are source, not generated).
 /serving/*.html
 !/serving/viewer_template.html
+!/serving/multimodel_viewer.html
 
 # Python
 __pycache__/

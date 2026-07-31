@@ -211,9 +211,12 @@ def main():
     model.train()
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    total = args.epochs * (args.max_steps or 200)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=max(total, 1),
-                                                pct_start=0.1)
+    # Stepped once per EPOCH, not per batch. A per-batch OneCycleLR needs
+    # total_steps up front, but this is an IterableDataset whose length is not
+    # known without a full pass -- guessing it low silently exhausts the
+    # schedule early and freezes training at lr~0 (which cost 3 of 8 epochs on
+    # the first real run: identical loss and mIoU for epochs 6-8).
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(args.epochs, 1))
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
     best = -1.0
@@ -234,10 +237,9 @@ def main():
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
-            if sched.last_epoch < sched.total_steps - 1:
-                sched.step()
             run += loss.item()
             steps += 1
+        sched.step()
 
         iou, union = evaluate(model, val_loader, device, n_classes,
                               max_batches=20 if args.max_steps else 0)
