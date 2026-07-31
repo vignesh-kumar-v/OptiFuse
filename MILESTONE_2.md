@@ -1,0 +1,203 @@
+# Milestone 2: Multi-Model Perception Stack
+
+Three perception models — object detection, drivable-area segmentation, and metric monocular
+depth — fine-tuned on the Waymo Open Dataset, each exported to ONNX, compiled to an FP16 TensorRT
+engine, and served **concurrently from a single NVIDIA Triton instance** behind one shared
+streaming preprocessing pass.
+
+**Hardware:** NVIDIA RTX 5060 Laptop GPU (Blackwell, 8GB, compute capability 12.0).
+
+**Status:** all three models are built, served, and verified end-to-end at *prototype* data scale.
+Production-scale training on GCP is the remaining step (quota now granted — see below).
+
+## Architecture
+
+```
+                                  .tfrecord  (waymo_lib.py — numpy + stdlib only)
+                                      |
+                          waymo_extract.py  ->  tar shards
+                          (jpg + boxes json + seg.png + depth.npz)
+                                      |
+                    +-----------------+-----------------+
+                    |                 |                 |
+              detection          segmentation         depth
+              YOLO26n            SegFormer-B0     Depth Anything V2
+                    |                 |                 |
+                  ONNX              ONNX              ONNX      <- each numerically
+                    |                 |                 |          validated vs PyTorch
+              TensorRT FP16     TensorRT FP16     TensorRT FP16
+                    |                 |                 |
+                    +--------- ONE Triton instance -----+
+                                      |
+                        serving/preprocessing.py
+                    (decode JPEG once -> 3 input tensors)
+                                      |
+                        serving/multimodel_client.py
+                  (3 requests in flight, joined on frame id)
+                                      |
+                          synchronized 3-panel viewer
+```
+
+## Results
+
+### Concurrent serving — the headline
+
+All three engines resident in one Triton instance, **690MB of 8151MB VRAM total**.
+
+Measured by `multimodel_client.py --benchmark`, dispatching identical frames serially vs
+concurrently (median over 10 frames):
+
+| | latency |
+|---|---|
+| serial (3 sequential requests) | 51.2 ms |
+| **concurrent (3 in flight)** | **37.1 ms** |
+| speedup | **1.38x** |
+
+Per-model round trip: detector 20.9ms, segmentation 9.9ms, depth 17.2ms.
+
+The gain is real but well under 3x, and it is worth being precise about why: a single GPU has one
+pool of SMs, so three models genuinely contend for compute rather than running free in parallel.
+The concurrent wall clock (37ms) lands near the slowest model plus contention, not near the sum
+(48ms). Python and gRPC overhead account for the rest — the pure engine compute times below are
+far lower.
+
+### Per-engine compute (trtexec, FP16, isolated)
+
+| model | engine | throughput | mean latency |
+|---|---|---|---|
+| detection (YOLO26n, 1280x1280) | 9.7 MB | 395.5 qps | 2.53 ms |
+| segmentation (SegFormer-B0, 960x640) | 11.9 MB | 250.2 qps | 3.99 ms |
+| depth (Depth Anything V2 Small, 966x644) | 55.5 MB | 65.0 qps | 15.37 ms |
+
+### Segmentation — drivable area + lane markings
+
+SegFormer-B0 (Cityscapes-pretrained) fine-tuned on Waymo panoptic labels collapsed to 4 classes.
+5 labelled segments, **segment-level** 4-train / 1-val split, 8 epochs at ~88s/epoch.
+
+| class | IoU | share of labelled pixels |
+|---|---|---|
+| background | 0.909 | 75.6% |
+| road | **0.838** | 19.0% |
+| sidewalk | 0.395 | 4.2% |
+| marking | **0.026** | 1.2% |
+| **mIoU** | **0.542** | |
+
+Road segmentation is strong and visibly correct on real frames. **Marking is not solved** — 0.026
+IoU means the model essentially does not find lane markings, and that is reported here rather than
+hidden inside the mIoU. Contributing factors, in order of confidence: markings are thin structures
+at ~1.2% of pixels; only 5 labelled segments exist locally; and the first real run wasted 3 of 8
+epochs to a scheduler bug (below) that has since been fixed but not yet re-run at length.
+
+`LANE_MARKER(21)` is merged into `ROAD_MARKER(22)` deliberately — measured on real frames, class 21
+alone is 0.00–0.12% of pixels and absent from many frames entirely, which is unlearnable in
+isolation.
+
+### Depth — metric, supervised on sparse lidar
+
+Depth Anything V2 (Metric, Outdoor) fine-tuned against lidar projected into the camera. Only
+~0.1–1% of pixels carry a lidar return, so **every loss and metric is masked to valid pixels** —
+computing them densely would average over ~99% zeros and yield a model that looks fine by the loss
+and predicts nothing useful.
+
+| | AbsRel | RMSE | δ<1.25 |
+|---|---|---|---|
+| pretrained baseline (zero-shot on Waymo) | 0.2778 | 10.30 m | 0.622 |
+| **after fine-tuning** | **0.1705** | **8.50 m** | **0.739** |
+
+Measured over 489,166 real lidar points. Reporting the pretrained baseline matters: it shows the
+fine-tuning is contributing (-39% AbsRel) rather than the pretrained model doing all the work.
+
+Best result was **epoch 1**, with validation degrading over epochs 2–4 while training loss kept
+falling — overfitting on limited data, the same pattern the detector showed in Milestone 1.
+
+Known artifact: sky is predicted at mid-range rather than far. This is a standard monocular-depth
+failure on textureless, unbounded regions and is visible in the viewer.
+
+### Night regression test
+
+Running the full stack on a held-out **Night** segment (`14300007604205869133`, `time_of_day:
+Night`) is the explicit regression test for the domain gap found in Milestone 1, and it produced a
+clean contrast:
+
+- **Segmentation generalizes well to night.** Road is accurately covered around parked cars and
+  the yellow centre line is picked up (road 31.8% of pixels). Its training set *included* a Night
+  segment.
+- **Detection returns zero detections** on clearly visible parked cars. Its training set contained
+  **zero** Night segments.
+
+Same scene, same frame, same server. This is about as direct a demonstration as one could ask for
+that the Milestone 1 detector's weakness is a data-coverage problem, not an architecture problem —
+and it is why the production run below is stratified by condition.
+
+## Data findings
+
+`data/probe_segments.py` classifies GCS segments by reading only the first ~20MB via HTTP range
+requests — **~40x faster** than streaming with `gcloud storage cat` (13s for 8 segments vs 67s
+each), which makes scanning the whole dataset practical.
+
+Two findings that change the production plan:
+
+1. **Camera segmentation labels are concentrated in the validation split.** 19 of 202 validation
+   segments carry them; **0 of the first 80 training segments** do. If segmentation were uniformly
+   distributed at the validation rate, seeing 0 in 80 would happen ~0.05% of the time. Segmentation
+   training therefore has to draw from the validation split, with a segment-level split inside it.
+   Within a labelled segment, coverage is dense: ~50% of frames (every odd frame), all 5 cameras.
+2. **Condition coverage of the validation split:** Day 160, Dawn/Dusk 23, Night 19, rain 1. Night
+   data exists in useful quantity; Milestone 1 simply never sampled it. Rain is genuinely scarce.
+
+## Bugs found and fixed
+
+- **Depth ONNX had symbolic output dims.** `squeeze(1)` left the graph with
+  `Squeezedepth_dim_0` instead of a fixed shape, which TensorRT will not bind to a static engine
+  without an optimization profile. Reshaping to literal ints pins the output at `[1, 644, 966]`.
+- **Segmentation LR schedule exhausted early.** A per-batch `OneCycleLR` was sized from a guessed
+  200 steps/epoch when the real figure is 327, so the schedule ran out and froze training at
+  lr≈0 — epochs 6, 7 and 8 of the first real run were byte-identical. Replaced with a per-epoch
+  cosine schedule, which needs no step count (the dataset is an `IterableDataset` with no length).
+- **Segmentation was missing ImageNet normalization.** The checkpoint's processor has
+  `do_normalize=True`, but training fed plain 0-1 pixels, shifting the input distribution away
+  from what the pretrained Cityscapes encoder expects. Both new models now bake normalization
+  **into the ONNX graph**, so every engine takes plain 0-1 RGB and the constants cannot drift
+  between trainer and client.
+- **FP16 depth output broke the viewer.** `cv2.resize` has no float16 kernel; widened before resize.
+
+## Engineering notes
+
+- **One letterbox implementation.** `serving/preprocessing.py` owns it; `client.py` delegates.
+  Verified at promotion time to still match Ultralytics' `predictor.preprocess()` to **5.96e-08**
+  and to be bit-identical to the previous inline copy, and `client.py` reproduced its exact prior
+  output (268 detections: 209/50/9) afterwards.
+- **Segmentation emits a finished class map, not logits.** The graph bundles upsample + argmax, so
+  a frame costs 614KB on the wire instead of 9.8MB of float32 logits — 16x less at streaming rates.
+- **Task-appropriate validation.** Discrete class maps are checked as pixel agreement (worst
+  99.956% FP16), depth in metres (worst 0.31m FP16), detections by IoU+class matching. A single
+  generic float tolerance would be meaningless across all three.
+- **Reused rather than rebuilt.** `waymo_extract.py` / `waymo_dataset.py` come from the
+  collaborator's `feature/image-processing` branch and supply the tar-shard data layer for both new
+  models. Their `_selfcheck()` gates run as part of this milestone's verification.
+- **Visualization.** Class colours come from a validated categorical palette (all-pairs on the dark
+  surface: worst CVD ΔE 8.4, normal-vision 19.8, all ≥3:1 contrast), and every class ships a swatch
+  *and* a label so identity is never colour-alone. Depth uses a monotonic-lightness ramp with a
+  metre scale legend — not JET, whose non-monotonic lightness invents banding that is not in the
+  data.
+
+## Remaining: production training on GCP
+
+Everything above is prototype scale (5 segmentation segments, 11 depth segments). The limiting
+factor is data, not the pipeline.
+
+**GPU quota is granted** — `GPUS_ALL_REGIONS` went 0 → 1 on project `vl-waymo-2026` (NVIDIA L4
+requested; regional L4 quota was already 1, the global cap was the actual blocker).
+
+Planned:
+1. GCS bucket for extracted shards; run extraction **on a GCP VM** — the Waymo bucket is public
+   GCS, so same-cloud reads are fast and egress-free, avoiding a 100GB+ home download.
+2. Segment selection **stratified by `Frame.stats`** (~50% Day / 25% Night / 25% Dawn-Dusk, mixed
+   sf/phx, rain where available) — directly correcting the gap the night test exposes.
+3. Detection trains from the **training** split and validates on the **validation** split; the
+   detector backbone scales n → s (or m). Segmentation must draw from validation-split segments per
+   the finding above, and that constraint gets stated wherever its numbers are quoted.
+4. Re-export → rebuild engines → re-serve → re-run the confidence sweep, per-class IoU and depth
+   metrics, and record whatever the real numbers turn out to be.
+
+Cost control: spot instances, VMs shut down after each run, only trained weights retained.
