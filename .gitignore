@@ -3,6 +3,18 @@
 *_viewer.html
 *.tfrecord
 
+# Generated ML pipeline artifacts (regenerable from source + downloaded data)
+/data/datasets/
+/models/detection/runs/
+# Pretrained base checkpoint -- Ultralytics auto-downloads this on first train.py run
+/models/detection/*.pt
+/serving/triton_repo/*/[0-9]*/
+/serving/build_engine.log
+# Any client.py output viewer, whatever --out name was used -- keep only the
+# hand-authored template.
+/serving/*.html
+!/serving/viewer_template.html
+
 # Python
 __pycache__/
 *.py[cod]

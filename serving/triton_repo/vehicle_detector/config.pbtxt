@@ -1,0 +1,33 @@
+# Waymo detector (vehicle/pedestrian/cyclist), YOLO26n fine-tuned, FP16 TensorRT engine.
+# Shapes/dtypes here must match the ONNX graph exactly (checked via onnx.load):
+#   input  "images"  FP16 [1, 3, 1280, 1280]
+#   output "output0" FP32 [1, 300, 6]   -- (x1, y1, x2, y2, confidence, class_id) x 300 slots
+name: "vehicle_detector"
+platform: "tensorrt_plan"
+
+# The engine's batch dimension is baked in as a fixed 1, not a dynamic axis --
+# so Triton must NOT try to prepend its own batching dimension on top of it.
+# max_batch_size: 0 means "the dims below are the complete, literal shape".
+max_batch_size: 0
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP16
+    dims: [ 1, 3, 1280, 1280 ]
+  }
+]
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [ 1, 300, 6 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Waymo detection stream</title>
+<style>
+  :root{
+    --bg:#000; --panel:#000; --ctrl:#0c0f13; --line:#1d232b; --fg:#dde3ea;
+    --dim:#78848f; --accent:#4ade80;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg); overflow:hidden;
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:grid; grid-template-rows:1fr auto;
+  }
+  #main{display:grid; grid-template-columns:1fr 340px; min-height:0}
+  #view{position:relative; min-width:0; background:#000; display:flex; align-items:center; justify-content:center}
+  #imgwrap{position:relative; max-width:100%; max-height:100%}
+  #frame{display:block; max-width:100%; max-height:100%}
+  #overlay{position:absolute; top:0; left:0; width:100%; height:100%}
+  #hud{position:absolute; top:10px; left:12px; pointer-events:none; text-shadow:0 1px 3px #000; font-size:12px; line-height:1.6}
+  #hud b{color:var(--accent); font-weight:600}
+  #side{background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; overflow-y:auto}
+  #camtabs{display:flex; flex-wrap:wrap; gap:4px; padding:8px; border-bottom:1px solid var(--line)}
+  #camtabs button{flex:1 1 auto; padding:5px 6px; font:inherit; font-size:11px; cursor:pointer;
+    background:var(--ctrl); color:var(--dim); border:1px solid var(--line); border-radius:4px}
+  #camtabs button.on{background:#18202b; color:var(--fg); border-color:#31404f}
+  #stats{padding:12px}
+  h4{margin:14px 0 7px; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.09em}
+  h4:first-child{margin-top:0}
+  .row{display:flex; justify-content:space-between; padding:2px 0; font-size:12px}
+  .row span:last-child{color:var(--accent)}
+  .chip{display:flex; align-items:center; gap:6px; padding:3px 0; font-size:12px}
+  .dot{width:9px; height:9px; border-radius:50%; flex:0 0 auto}
+  #bar{display:flex; align-items:center; gap:12px; padding:8px 14px; background:var(--panel); border-top:1px solid var(--line)}
+  #bar button{width:34px; height:28px; font:inherit; cursor:pointer; border-radius:4px;
+    background:var(--ctrl); color:var(--fg); border:1px solid var(--line)}
+  #seek{flex:1; accent-color:var(--accent)}
+  #tlabel{color:var(--dim); min-width:190px; text-align:right; font-size:11px}
+</style>
+</head>
+<body>
+<div id="main">
+  <div id="view">
+    <div id="imgwrap">
+      <img id="frame">
+      <svg id="overlay"></svg>
+      <div id="hud"></div>
+    </div>
+  </div>
+  <div id="side">
+    <div id="camtabs"></div>
+    <div id="stats">
+      <h4>Segment</h4>
+      <div class="row"><span id="s-name"></span><span></span></div>
+      <div class="row"><span>frames</span><span id="s-frames"></span></div>
+      <div class="row"><span>images</span><span id="s-images"></span></div>
+      <div class="row"><span>conf threshold</span><span id="s-conf"></span></div>
+
+      <h4>Detections</h4>
+      <div id="s-classes"></div>
+
+      <h4>Round-trip latency</h4>
+      <div class="row"><span>mean</span><span id="s-mean"></span></div>
+      <div class="row"><span>p50</span><span id="s-p50"></span></div>
+      <div class="row"><span>p90</span><span id="s-p90"></span></div>
+      <div class="row"><span>p99</span><span id="s-p99"></span></div>
+    </div>
+  </div>
+</div>
+<div id="bar">
+  <button id="prev">&lt;</button>
+  <button id="play">&#9654;</button>
+  <button id="next">&gt;</button>
+  <input id="seek" type="range" min="0" value="0">
+  <span id="tlabel"></span>
+</div>
+<script>
+const META = /*__META__*/ null;
+const FRAMES = /*__FRAMES__*/ null;
+
+const CLASS_COLORS = {vehicle:"#3987e5", pedestrian:"#d95926", cyclist:"#c98500"};
+
+let curCam = META.cameras[0];
+let subset = [];
+let idx = 0;
+let playing = false;
+let timer = null;
+
+const frameEl = document.getElementById("frame");
+const overlay = document.getElementById("overlay");
+const hud = document.getElementById("hud");
+const seek = document.getElementById("seek");
+const tlabel = document.getElementById("tlabel");
+
+function buildCamTabs(){
+  const wrap = document.getElementById("camtabs");
+  if (META.cameras.length <= 1) { wrap.style.display = "none"; return; }
+  wrap.innerHTML = "";
+  for (const cam of META.cameras){
+    const b = document.createElement("button");
+    b.textContent = cam;
+    b.className = cam === curCam ? "on" : "";
+    b.onclick = () => { curCam = cam; rebuildSubset(); render(); };
+    wrap.appendChild(b);
+  }
+}
+
+function rebuildSubset(){
+  subset = FRAMES.filter(f => f.cam === curCam);
+  idx = Math.min(idx, Math.max(0, subset.length - 1));
+  seek.max = Math.max(0, subset.length - 1);
+  for (const b of document.querySelectorAll("#camtabs button"))
+    b.className = b.textContent === curCam ? "on" : "";
+}
+
+function render(){
+  if (!subset.length) return;
+  const f = subset[idx];
+  frameEl.src = "data:image/jpeg;base64," + f.jpg;
+  overlay.setAttribute("viewBox", `0 0 ${f.w} ${f.h}`);
+  overlay.innerHTML = f.svg;
+  hud.innerHTML = `<b>${f.cam}</b> frame ${f.frame}<br>t=${f.t.toFixed(2)}s &nbsp; `
+    + `${f.n} detection${f.n === 1 ? "" : "s"} &nbsp; ${f.ms}ms`;
+  seek.value = idx;
+  tlabel.textContent = `${idx + 1} / ${subset.length}`;
+}
+
+function step(delta){
+  idx = Math.max(0, Math.min(subset.length - 1, idx + delta));
+  render();
+}
+
+document.getElementById("prev").onclick = () => { stop(); step(-1); };
+document.getElementById("next").onclick = () => { stop(); step(1); };
+seek.oninput = () => { stop(); idx = +seek.value; render(); };
+
+function play(){
+  playing = true;
+  document.getElementById("play").innerHTML = "&#10074;&#10074;";
+  timer = setInterval(() => {
+    if (idx >= subset.length - 1) { stop(); return; }
+    step(1);
+  }, 150);
+}
+function stop(){
+  playing = false;
+  document.getElementById("play").innerHTML = "&#9654;";
+  clearInterval(timer);
+}
+document.getElementById("play").onclick = () => playing ? stop() : play();
+
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { stop(); step(1); }
+  if (e.key === "ArrowLeft") { stop(); step(-1); }
+  if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
+});
+
+function fillStats(){
+  document.getElementById("s-name").textContent = META.segment;
+  document.getElementById("s-frames").textContent = META.n_frames;
+  document.getElementById("s-images").textContent = META.n_images;
+  document.getElementById("s-conf").textContent = META.conf_thres;
+  document.getElementById("s-mean").textContent = META.latency_ms.mean + " ms";
+  document.getElementById("s-p50").textContent = META.latency_ms.p50 + " ms";
+  document.getElementById("s-p90").textContent = META.latency_ms.p90 + " ms";
+  document.getElementById("s-p99").textContent = META.latency_ms.p99 + " ms";
+
+  const classesEl = document.getElementById("s-classes");
+  classesEl.innerHTML = "";
+  for (const [name, count] of Object.entries(META.class_counts)){
+    const row = document.createElement("div");
+    row.className = "chip";
+    row.innerHTML = `<span class="dot" style="background:${CLASS_COLORS[name] || '#8a97a3'}"></span>`
+      + `<span>${name}</span><span style="margin-left:auto;color:var(--accent)">${count}</span>`;
+    classesEl.appendChild(row);
+  }
+}
+
+buildCamTabs();
+rebuildSubset();
+fillStats();
+render();
+</script>
+</body>
+</html>
