@@ -92,6 +92,18 @@ epochs to a scheduler bug (below) that has since been fixed but not yet re-run a
 alone is 0.00–0.12% of pixels and absent from many frames entirely, which is unlearnable in
 isolation.
 
+**Two plausible explanations for the marking failure were tested and ruled out**, recorded here so
+they are not re-investigated:
+
+| hypothesis | measured | verdict |
+|---|---|---|
+| thin paint is destroyed downscaling 1920x1280 → 960x640 | 99.9% of marking pixels retained, 0/25 frames lose it entirely | ruled out |
+| thin paint cannot be represented at SegFormer's 1/4-resolution decode head (240x160) | 98.1% retained, ~607 head cells per frame | ruled out |
+
+Marking is therefore fully representable on the model's own output grid, so the cause is
+optimization/data rather than geometry. The known contributor is the LR-schedule bug below, which
+froze 3 of the 8 epochs at lr≈0; that fix has not yet been re-run at length.
+
 ### Depth — metric, supervised on sparse lidar
 
 Depth Anything V2 (Metric, Outdoor) fine-tuned against lidar projected into the camera. Only
