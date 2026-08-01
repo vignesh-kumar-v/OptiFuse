@@ -15,7 +15,7 @@ IMAGE="nvcr.io/nvidia/tritonserver:26.06-py3"
 
 # model -> "<dir containing the onnx> <onnx filename> <engine filename>"
 declare -A SPEC=(
-  [detector]="$HERE/../models/detection/runs/waymo_detect_final/weights best_fp16.onnx best.plan"
+  [detector]="$HERE/../models/detection/runs/waymo_detect_v2/weights best_fp16.onnx best.plan"
   [segmentation]="$HERE/../models/segmentation/runs/seg_v1/best model_fp16.onnx model.plan"
   [depth]="$HERE/../models/depth/runs/depth_v1/best model_fp16.onnx model.plan"
 )

@@ -164,23 +164,56 @@ frame**. That is correct, not a bug — every detection there sits 5–18 m late
 both curbs, pedestrians on the sidewalk) and the road ahead is genuinely empty. Sign conventions
 check out independently: objects right of frame centre get negative lateral offset, left positive.
 
-### Detection quality by lighting condition
+### Detection: diagnosing the night gap, and fixing it
 
-Measured across our segments — detections found at conf 0.20 vs ground-truth objects per frame:
+The Milestone 1 detector was trained on 4 Day + 1 Dawn/Dusk segments and **zero Night**. Measuring
+detections found at conf 0.20 against ground-truth objects per frame made the consequence explicit:
+daylight ran 0.35–0.80, night ran **0.02–0.04** — a ~20x collapse. Not a threshold artifact either;
+at conf 0.10 the night segments still returned 0.9–2.9 detections against 10–26 real objects, so
+there was no signal to recover.
 
-| segment | condition | GT/frame | found | ratio |
+**Detector v2** rebuilds the dataset from 11 local segments (8,925 → 10,785 train images after 4x
+cyclist oversampling, vs 4,955 in v1) and, critically, includes a Night segment. The Night/SF
+segment was held out of **both** splits (`prepare_detection_dataset.py --exclude`) so it remains a
+genuinely unseen generalization test rather than a memorized one. 22 epochs, early-stopped.
+
+Validation set (990 images, 9,936 boxes):
+
+| class | metric | M1 | **v2** | change |
 |---|---|---|---|---|
-| 10203656… | Day / phx | 28.6 | 10.0 | 0.35 |
-| 10243601… | Day / sf | 13.4 | 9.2 | 0.69 |
-| 10689101… | Dawn/Dusk / phx | 8.2 | 6.6 | 0.80 |
-| 20946813… | Day / phx | 28.1 | 15.5 | 0.55 |
-| 18024188… | **Night** / phx | 10.6 | **0.4** | **0.04** |
-| 14300007… | **Night** / sf | 26.0 | **0.6** | **0.02** |
+| all | mAP50 | 0.331 | **0.448** | +35% |
+| all | recall | 0.292 | **0.400** | +37% |
+| all | mAP50-95 | 0.181 | **0.242** | +34% |
+| vehicle | mAP50 | 0.503 | **0.561** | +12% |
+| pedestrian | mAP50 | 0.457 | **0.533** | +17% |
+| cyclist | mAP50 | 0.0325 | **0.250** | **7.7x** |
 
-Daylight performance is moderate (0.35–0.80); night is a **~20x collapse**. It is not a threshold
-artifact — at conf 0.10 the night segments still yield only 0.9–2.9 detections against 10–26
-ground-truth objects, i.e. there is no signal to recover. The Milestone 1 detector was trained on
-4 Day + 1 Dawn/Dusk segments and zero Night, and this is that gap measured directly.
+Cyclist moving from 0.03 to 0.25 is the largest single gain — it went from effectively broken to
+genuinely functional.
+
+By lighting condition (same measurement as before, v1 → v2):
+
+| segment | condition | split | GT/frame | found | ratio | was | change |
+|---|---|---|---|---|---|---|---|
+| 10203656… | Day / phx | train | 28.6 | 19.4 | 0.68 | 0.35 | 1.9x |
+| 10243601… | Day / sf | train | 13.4 | 14.0 | 1.05 | 0.69 | 1.5x |
+| 10689101… | Dawn/Dusk / phx | val | 8.2 | 7.6 | 0.92 | 0.80 | 1.2x |
+| 20946813… | Day / phx | train | 28.1 | 26.4 | 0.94 | 0.55 | 1.7x |
+| 18024188… | Night / phx | train | 10.6 | 8.6 | 0.81 | 0.04 | 20.3x |
+| 14300007… | **Night / sf** | **UNSEEN** | 26.0 | 7.8 | **0.30** | 0.02 | **14.9x** |
+
+The row that matters is the last one: a segment the model never saw in any form went from 0.02 to
+**0.30**. Night is no longer a collapse.
+
+**Two honest caveats.** First, this "ratio" is detections ÷ ground-truth count, a crude proxy — a
+value near or above 1.0 (Day/sf reads 1.05) means the *counts* match, not that every box is
+correct; false positives and false negatives can cancel. The rigorous numbers are the mAP table
+above. Second, unseen night at 0.30 is still well below daylight's 0.68–1.05, so night is much
+improved but not solved; the in-training night segment reading 0.81 partly reflects memorization.
+
+On the unseen night segment the full stack now produces 8.9 detections/frame (previously ~0.6) and
+finds a lead vehicle in 29 of 30 frames at plausible ranges (41 m, 49 m, 54 m), with nearby parked
+cars resolving to 8.8–18 m.
 
 ### Night regression test
 
