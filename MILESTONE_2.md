@@ -113,6 +113,63 @@ falling — overfitting on limited data, the same pattern the detector showed in
 Known artifact: sky is predicted at mid-range rather than far. This is a standard monocular-depth
 failure on textureless, unbounded regions and is visible in the viewer.
 
+### Fusion: distance to the object ahead
+
+The three models are combined into a single perception output rather than three
+independent overlays. For each detection, depth is sampled inside the box, and the camera
+calibration converts (pixel, depth) into a position in the **vehicle's own frame** — forward
+distance and lateral offset. Anything within ±1.8 m of centre counts as in-lane; the nearest such
+object is the lead object, which is what an in-car display actually shows.
+
+Geometry follows Waymo's camera convention (x = forward optical axis, y = left, z = up — not
+OpenCV's z-forward). The depth model's training target is the x-component in camera frame, so a
+prediction is already distance along the optical axis and back-projects directly:
+
+```
+y = -(u - c_u) * depth / f_u        then  p_vehicle = extrinsic @ [x, y, z, 1]
+z = -(v - c_v) * depth / f_v
+```
+
+Depth per box is a low percentile of an **inner** patch: a box's outer margin usually contains
+background (road behind a car, sky beside a pole), and including it biases the estimate long.
+
+**Validated against 3D lidar labels** (`python3 serving/distance.py`), projecting ground-truth
+boxes into the image and comparing to our estimate at those pixels — 34 vehicles, 3–70 m, ≥30
+lidar returns each:
+
+| metric | value |
+|---|---|
+| mean relative error | **5.5%** |
+| median absolute error | **1.48 m** |
+| within 15% relative | **88.2%** |
+| mean signed error | −2.21 m (we slightly under-read, consistent with sampling the near face) |
+
+Estimates are also temporally stable without any tracking or smoothing — a lead vehicle reads
+66.5–67.3 m across nine consecutive frames.
+
+A useful negative result: on the residential val segment the system reports **no lead object in any
+frame**. That is correct, not a bug — every detection there sits 5–18 m laterally (cars parked along
+both curbs, pedestrians on the sidewalk) and the road ahead is genuinely empty. Sign conventions
+check out independently: objects right of frame centre get negative lateral offset, left positive.
+
+### Detection quality by lighting condition
+
+Measured across our segments — detections found at conf 0.20 vs ground-truth objects per frame:
+
+| segment | condition | GT/frame | found | ratio |
+|---|---|---|---|---|
+| 10203656… | Day / phx | 28.6 | 10.0 | 0.35 |
+| 10243601… | Day / sf | 13.4 | 9.2 | 0.69 |
+| 10689101… | Dawn/Dusk / phx | 8.2 | 6.6 | 0.80 |
+| 20946813… | Day / phx | 28.1 | 15.5 | 0.55 |
+| 18024188… | **Night** / phx | 10.6 | **0.4** | **0.04** |
+| 14300007… | **Night** / sf | 26.0 | **0.6** | **0.02** |
+
+Daylight performance is moderate (0.35–0.80); night is a **~20x collapse**. It is not a threshold
+artifact — at conf 0.10 the night segments still yield only 0.9–2.9 detections against 10–26
+ground-truth objects, i.e. there is no signal to recover. The Milestone 1 detector was trained on
+4 Day + 1 Dawn/Dusk segments and zero Night, and this is that gap measured directly.
+
 ### Night regression test
 
 Running the full stack on a held-out **Night** segment (`14300007604205869133`, `time_of_day:

@@ -97,6 +97,10 @@ def main():
                     help=f"output dataset directory [{DEFAULT_OUT_DIR}]")
     ap.add_argument("--val-segment", default=VAL_SEGMENT,
                     help="filename of the segment to hold out entirely for validation")
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="substrings of segment filenames to leave out of BOTH splits -- "
+                         "for holding a segment back as a genuinely unseen test set, "
+                         "separate from the val split used to steer training")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -111,15 +115,24 @@ def main():
     if not all_segments:
         raise SystemExit(f"no .tfrecord files found in {segments_dir}")
 
-    val_segments = [p for p in all_segments if os.path.basename(p) == args.val_segment]
-    train_segments = [p for p in all_segments if os.path.basename(p) != args.val_segment]
+    held_out = [p for p in all_segments
+                if any(x in os.path.basename(p) for x in args.exclude)]
+    usable = [p for p in all_segments if p not in held_out]
+
+    val_segments = [p for p in usable if os.path.basename(p) == args.val_segment]
+    train_segments = [p for p in usable if os.path.basename(p) != args.val_segment]
     if not val_segments:
-        raise SystemExit(f"val segment {args.val_segment} not found in {segments_dir}")
+        raise SystemExit(f"val segment {args.val_segment} not found (or was excluded)")
 
     print(f"Train segments ({len(train_segments)}):")
     for p in train_segments:
         print(f"  {os.path.basename(p)}")
-    print(f"Val segment: {os.path.basename(val_segments[0])}\n")
+    print(f"Val segment: {os.path.basename(val_segments[0])}")
+    if held_out:
+        print(f"Held out of BOTH splits ({len(held_out)}) -- reserved as unseen test:")
+        for p in held_out:
+            print(f"  {os.path.basename(p)}")
+    print()
 
     for split_name, segs in (("train", train_segments), ("val", val_segments)):
         images_dir = os.path.join(out_dir, "images", split_name)
