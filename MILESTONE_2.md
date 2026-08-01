@@ -92,17 +92,33 @@ epochs to a scheduler bug (below) that has since been fixed but not yet re-run a
 alone is 0.00–0.12% of pixels and absent from many frames entirely, which is unlearnable in
 isolation.
 
-**Two plausible explanations for the marking failure were tested and ruled out**, recorded here so
-they are not re-investigated:
+**Three explanations for the marking failure were tested and ruled out**, recorded here so they are
+not re-investigated:
 
 | hypothesis | measured | verdict |
 |---|---|---|
 | thin paint is destroyed downscaling 1920x1280 → 960x640 | 99.9% of marking pixels retained, 0/25 frames lose it entirely | ruled out |
 | thin paint cannot be represented at SegFormer's 1/4-resolution decode head (240x160) | 98.1% retained, ~607 head cells per frame | ruled out |
+| the LR schedule froze training early (it did — 3 of 8 epochs sat at lr≈0) | re-ran with a per-epoch cosine schedule for 25 epochs | ruled out as *the* cause |
 
-Marking is therefore fully representable on the model's own output grid, so the cause is
-optimization/data rather than geometry. The known contributor is the LR-schedule bug below, which
-froze 3 of the 8 epochs at lr≈0; that fix has not yet been re-run at length.
+The LR fix was real and worth making, but it did not rescue marking:
+
+| | v1 (LR froze at ep 5) | v2 (25 ep, fixed schedule) |
+|---|---|---|
+| mIoU | 0.5420 | **0.5481** |
+| road | 0.838 | 0.826 |
+| sidewalk | 0.395 | **0.423** |
+| **marking** | **0.026** | **0.030** |
+
+Marking plateaued at ~0.030 by epoch 5 and did not move across 20 further epochs, while training
+loss fell steadily from 0.98 to 0.228 — the optimizer is making progress on everything *except*
+this class.
+
+Since geometry and the schedule are eliminated, the live hypotheses are: only 5 labelled segments
+(~2,450 images) exist locally; and the class weight is too weak — inverse-**sqrt** frequency gives
+marking just 2.08x against background's 0.26x, which for a class occupying 1.2% of pixels may
+simply not produce enough gradient to matter. The cheap next experiment is inverse-frequency (not
+inverse-sqrt) weighting, or a larger Dice term, before adding data.
 
 ### Depth — metric, supervised on sparse lidar
 
